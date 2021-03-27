@@ -3,8 +3,10 @@ use cosmwasm_std::{
     StdResult, Storage,
 };
 
-use crate::msg::{CountResponse, HandleMsg, InitMsg, QueryMsg};
+use crate::msg::{HandleMsg, InitMsg, QueryMsg, ConfigResponse};
 use crate::state::{config, config_read, State};
+use terraswap::asset::{Asset};
+
 
 pub fn init<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -12,8 +14,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
     let state = State {
-        count: msg.count,
-        owner: deps.api.canonical_address(&env.message.sender)?,
+        owner: env.message.sender,
     };
 
     config(&mut deps.storage).save(&state)?;
@@ -27,36 +28,26 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
     msg: HandleMsg,
 ) -> StdResult<HandleResponse> {
     match msg {
-        HandleMsg::Increment {} => try_increment(deps, env),
-        HandleMsg::Reset { count } => try_reset(deps, env, count),
+        HandleMsg::Mint { asset, } => try_mint(deps, env, asset),
+        HandleMsg::Redeem { asset, } => try_redeem(deps, env, asset),
     }
 }
 
-pub fn try_increment<S: Storage, A: Api, Q: Querier>(
+pub fn try_mint<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     _env: Env,
+    asset: Asset
 ) -> StdResult<HandleResponse> {
-    config(&mut deps.storage).update(|mut state| {
-        state.count += 1;
-        Ok(state)
-    })?;
 
     Ok(HandleResponse::default())
 }
 
-pub fn try_reset<S: Storage, A: Api, Q: Querier>(
+pub fn try_redeem<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
-    count: i32,
+    asset: Asset,
 ) -> StdResult<HandleResponse> {
-    let api = &deps.api;
-    config(&mut deps.storage).update(|mut state| {
-        if api.canonical_address(&env.message.sender)? != state.owner {
-            return Err(StdError::unauthorized());
-        }
-        state.count = count;
-        Ok(state)
-    })?;
+
     Ok(HandleResponse::default())
 }
 
@@ -65,13 +56,13 @@ pub fn query<S: Storage, A: Api, Q: Querier>(
     msg: QueryMsg,
 ) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
+        QueryMsg::Config {} => to_binary(&query_config(deps)?),
     }
 }
 
-fn query_count<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<CountResponse> {
+fn query_config<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<ConfigResponse> {
     let state = config_read(&deps.storage).load()?;
-    Ok(CountResponse { count: state.count })
+    Ok(ConfigResponse { owner: state.owner })
 }
 
 #[cfg(test)]
