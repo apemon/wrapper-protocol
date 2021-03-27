@@ -1,0 +1,1 @@
+39c2ee5eed08586d131a5d1eea17072d0a7b01f870494d1da7f154a323e0f29f  wrapper_protocol.wasm

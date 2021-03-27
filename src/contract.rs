@@ -1,33 +1,65 @@
 use cosmwasm_std::{
     to_binary, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier, StdError,
-    StdResult, Storage,
+    StdResult, Storage, WasmMsg, log, Coin, CosmosMsg, CanonicalAddr, HandleResult, Uint128
 };
 
-use crate::msg::{HandleMsg, InitMsg, QueryMsg, ConfigResponse};
+use cw20::{Cw20HandleMsg, MinterResponse};
+use crate::msg::{HandleMsg, InitMsg, QueryMsg, ConfigResponse, PriceResponse};
 use crate::state::{config, config_read, State};
+use terraswap::querier::{simulate};
 use terraswap::asset::{Asset};
-
+use terraswap::pair::{HandleMsg as TerraswapHandleMsg};
+use terraswap::token::InitMsg as TokenInitMsg;
+use terraswap::hook::InitHook;
 
 pub fn init<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
-    let state = State {
-        owner: env.message.sender,
+
+    let state: &State = &State {
+        owner: deps.api.canonical_address(&env.message.sender)?,
+        asset: deps.api.canonical_address(&msg.asset)?,
+        pair: deps.api.canonical_address(&msg.pair)?,
+        token: CanonicalAddr::default()
     };
 
-    config(&mut deps.storage).save(&state)?;
+    config(&mut deps.storage, &state)?;
+    // Create LP token
+    let mut messages: Vec<CosmosMsg> = vec![CosmosMsg::Wasm(WasmMsg::Instantiate {
+        code_id: msg.token_code_id,
+        msg: to_binary(&TokenInitMsg {
+            name: "terraswap liquidity token".to_string(),
+            symbol: "uLP".to_string(),
+            decimals: 6,
+            initial_balances: vec![],
+            mint: Some(MinterResponse {
+                minter: env.contract.address.clone(),
+                cap: None,
+            }),
+            init_hook: Some(InitHook {
+                msg: to_binary(&HandleMsg::PostInitialize {})?,
+                contract_addr: env.contract.address,
+            }),
+        })?,
+        send: vec![],
+        label: None,
+    })];
 
-    Ok(InitResponse::default())
+    Ok(InitResponse {
+        messages,
+        log: vec![],
+    })
 }
 
 pub fn handle<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     msg: HandleMsg,
-) -> StdResult<HandleResponse> {
+) -> HandleResult  {
     match msg {
+        HandleMsg::PostInitialize {} => try_post_initialize(deps, env),
         HandleMsg::Mint { asset, } => try_mint(deps, env, asset),
         HandleMsg::Redeem { asset, } => try_redeem(deps, env, asset),
     }
@@ -35,18 +67,84 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 
 pub fn try_mint<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
-    _env: Env,
+    env: Env,
     asset: Asset
-) -> StdResult<HandleResponse> {
+) -> HandleResult {
 
-    Ok(HandleResponse::default())
+    let state = config_read(&deps.storage)?;
+
+    // swap asset from terraswap
+    // deduct tax first
+    let amount = (asset.deduct_tax(&deps)?).amount;
+    let mut messages: Vec<CosmosMsg> = vec![];
+    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: deps.api.human_address(&state.pair)?,
+        msg: to_binary(&TerraswapHandleMsg::Swap {
+            offer_asset: Asset {
+                amount,
+                ..asset
+            },
+            max_spread: None,
+            belief_price: None,
+            to: None,
+        })?,
+        send: vec![Coin {
+            denom: "uusd".to_string(),
+            amount,
+        }],
+    }));
+
+    // mint token
+    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: deps.api.human_address(&state.token)?,
+        msg: to_binary(&Cw20HandleMsg::Mint {
+            recipient: env.message.sender,
+            amount: Uint128(1000000u128),
+        })?,
+        send: vec![],
+    }));
+
+    Ok(HandleResponse {
+        messages,
+        log: vec![
+            log("action", "swap"),
+        ],
+        data: None,
+    })
+}
+
+// Must token contract execute it
+pub fn try_post_initialize<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>,
+    env: Env,
+) -> HandleResult {
+    let state: State = config_read(&deps.storage)?;
+
+    // permission check
+    if state.token != CanonicalAddr::default() {
+        return Err(StdError::unauthorized());
+    }
+
+    config(
+        &mut deps.storage,
+        &State {
+            token: deps.api.canonical_address(&env.message.sender)?,
+            ..state
+        },
+    )?;
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: vec![log("liquidity_token_addr", env.message.sender.as_str())],
+        data: None,
+    })
 }
 
 pub fn try_redeem<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     asset: Asset,
-) -> StdResult<HandleResponse> {
+) -> HandleResult {
 
     Ok(HandleResponse::default())
 }
@@ -57,81 +155,18 @@ pub fn query<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_binary(&query_config(deps)?),
+        QueryMsg::Price { asset } => to_binary(&query_price(deps, asset)?),
     }
 }
 
 fn query_config<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<ConfigResponse> {
-    let state = config_read(&deps.storage).load()?;
-    Ok(ConfigResponse { owner: state.owner })
+    let state = config_read(&deps.storage)?;
+    Ok(ConfigResponse { owner: deps.api.human_address(&state.owner)? })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cosmwasm_std::testing::{mock_dependencies, mock_env};
-    use cosmwasm_std::{coins, from_binary, StdError};
-
-    #[test]
-    fn proper_initialization() {
-        let mut deps = mock_dependencies(20, &[]);
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(1000, "earth"));
-
-        // we can just call .unwrap() to assert this was a success
-        let res = init(&mut deps, env, msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // it worked, let's query the state
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(17, value.count);
-    }
-
-    #[test]
-    fn increment() {
-        let mut deps = mock_dependencies(20, &coins(2, "token"));
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(2, "token"));
-        let _res = init(&mut deps, env, msg).unwrap();
-
-        // beneficiary can release it
-        let env = mock_env("anyone", &coins(2, "token"));
-        let msg = HandleMsg::Increment {};
-        let _res = handle(&mut deps, env, msg).unwrap();
-
-        // should increase counter by 1
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(18, value.count);
-    }
-
-    #[test]
-    fn reset() {
-        let mut deps = mock_dependencies(20, &coins(2, "token"));
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(2, "token"));
-        let _res = init(&mut deps, env, msg).unwrap();
-
-        // beneficiary can release it
-        let unauth_env = mock_env("anyone", &coins(2, "token"));
-        let msg = HandleMsg::Reset { count: 5 };
-        let res = handle(&mut deps, unauth_env, msg);
-        match res {
-            Err(StdError::Unauthorized { .. }) => {}
-            _ => panic!("Must return unauthorized error"),
-        }
-
-        // only the original creator can reset the counter
-        let auth_env = mock_env("creator", &coins(2, "token"));
-        let msg = HandleMsg::Reset { count: 5 };
-        let _res = handle(&mut deps, auth_env, msg).unwrap();
-
-        // should now be 5
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(5, value.count);
-    }
+fn query_price<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>, asset: Asset) -> StdResult<PriceResponse> {
+    let state = config_read(&deps.storage)?;
+    // query price from terraswap
+    let response = simulate(&deps, &deps.api.human_address(&state.pair)?, &asset)?;
+    Ok(PriceResponse { pair: deps.api.human_address(&state.pair)?, price: response })
 }
