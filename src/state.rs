@@ -9,9 +9,22 @@ pub static CONFIG_KEY: &[u8] = b"config";
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct State {
     pub owner: CanonicalAddr,
+    pub token: CanonicalAddr,
+    pub components: Vec<ComponentRaw>
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct ComponentRaw {
     pub asset: CanonicalAddr,
     pub pair: CanonicalAddr,
-    pub token: CanonicalAddr
+    pub unit: u128
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Component {
+    pub asset: HumanAddr,
+    pub pair: HumanAddr,
+    pub unit: u128
 }
 
 pub fn config<S: Storage>(storage: &mut S, data: &State) -> StdResult<()> {
