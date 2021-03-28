@@ -30,8 +30,8 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     let mut messages: Vec<CosmosMsg> = vec![CosmosMsg::Wasm(WasmMsg::Instantiate {
         code_id: msg.token_code_id,
         msg: to_binary(&TokenInitMsg {
-            name: "terraswap liquidity token".to_string(),
-            symbol: "uLP".to_string(),
+            name: "wrapper token".to_string(),
+            symbol: "uWARP".to_string(),
             decimals: 6,
             initial_balances: vec![],
             mint: Some(MinterResponse {
